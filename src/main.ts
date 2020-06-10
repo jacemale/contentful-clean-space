@@ -1,9 +1,8 @@
-// tslint:disable-next-line:no-reference
-///<reference path="./contentful-management.d.ts" />
 import { createClient } from "contentful-management";
 import * as inquirer from "inquirer";
 import * as ProgressBar from "progress";
 import * as yargs from "yargs";
+import { Space } from "contentful-management/typings/space";
 
 export async function main() {
     const argv = yargs.env()
@@ -20,6 +19,9 @@ export async function main() {
             type: "string",
             describe: "Contentful access token",
             demandOption: true
+        }).option("content-type", {
+            type: "string",
+            describe: "Content type to be removed",
         }).option("batch-size", {
             type: "number",
             describe: "Number of parallel contentful requests",
@@ -43,6 +45,7 @@ export async function main() {
     const spaceId: string = argv["space-id"];
     const verbose: boolean = argv["verbose"];
     const batchSize: number = argv["batch-size"];
+    const contentType: string | undefined = argv["content-type"];
     const isContentTypes: boolean = argv["content-types"];
     const yes: boolean = argv["yes"];
 
@@ -59,7 +62,7 @@ export async function main() {
         if (!await promptForEntriesConfirmation(spaceId, env))
             return;
     }
-    await deleteEntries(contentfulSpace, batchSize, verbose, env);
+    await deleteEntries(contentfulSpace, contentType, batchSize, verbose, env);
 
     if (isContentTypes) {
         if (!yes) {
@@ -88,11 +91,12 @@ async function promptForContentTypesConfirmation(spaceId: string, environment: s
     return a.yes;
 }
 
-async function deleteEntries(contentfulSpace: any, batchSize: number, verbose: boolean,  environment: string) {
+async function deleteEntries(contentfulSpace: Space, contentType: string | undefined, batchSize: number, verbose: boolean,  environment: string) {
     const selectedEnvironment = await contentfulSpace.getEnvironment(environment);
     const entriesMetadata = await selectedEnvironment.getEntries({
         include: 0,
-        limit: 0
+        limit: 0,
+        content_type: contentType
     });
     let totalEntries = entriesMetadata.total;
     console.log(`Deleting ${totalEntries} entries`);
@@ -102,7 +106,8 @@ async function deleteEntries(contentfulSpace: any, batchSize: number, verbose: b
     do {
         const entries = await selectedEnvironment.getEntries({
             include: 0,
-            limit: batchSize
+            limit: batchSize,
+            content_type: contentType
         });
         totalEntries = entries.total;
 
