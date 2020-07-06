@@ -4,6 +4,7 @@ import * as ProgressBar from "progress";
 import * as yargs from "yargs";
 import { Space } from "contentful-management/typings/space";
 import { Entry } from "contentful-management/typings/entry";
+import { Environment } from "contentful-management/typings/environment";
 
 export async function main() {
     const argv = yargs.env()
@@ -40,10 +41,15 @@ export async function main() {
             type: "boolean",
             alias: "v",
             default: false
-        }).option("whitelist", {
+        }).option("ignorelist", {
             type: "string",
             describe: "File with IDs to ignore",
-            alias: "w",
+            alias: "i",
+            default: undefined
+        }).option("removelist", {
+            type: "string",
+            describe: "File with IDs to remove",
+            alias: "r",
             default: undefined
         }).version(false)
         .parse();
@@ -54,7 +60,8 @@ export async function main() {
     const contentType: string | undefined = argv["content-type"];
     const isContentTypes: boolean = argv["content-types"];
     const yes: boolean = argv["yes"];
-    const whitelist: string | undefined = argv["whitelist"];
+    const ignorelist: string | undefined = argv["ignorelist"];
+    const removelist: string | undefined = argv["removelist"];
 
     const env: string = argv["env"] || 'master';
 
@@ -64,17 +71,21 @@ export async function main() {
     console.log(`Opening Contentful space "${spaceId}"`);
     const contentfulSpace = await contentfulManagementClient.getSpace(spaceId);
     console.log(`Using space "${spaceId}" (${contentfulSpace.name})`);
-    let ignored: Array<string> = [];
+    let filter: (entry: Entry) => boolean = () => true;
 
-    if (whitelist) {
-        ignored = require('fs').readFileSync(whitelist, 'utf-8').split(/\r?\n/);
+    if (ignorelist) {
+        let list: Array<string> = require('fs').readFileSync(ignorelist, 'utf-8').split(/\r?\n/);
+        filter = e => !list.some(id => id == e.sys.id);
+    } else if (removelist) {
+        let list: Array<string> = require('fs').readFileSync(removelist, 'utf-8').split(/\r?\n/);
+        filter = e => list.some(id => id == e.sys.id);
     }
 
     if (!yes) {
         if (!await promptForEntriesConfirmation(spaceId, env))
             return;
     }
-    await deleteEntries(contentfulSpace, contentType, batchSize, verbose, env, e => !ignored.some(id => id == e.sys.id));
+    await deleteEntries(contentfulSpace, contentType, batchSize, verbose, env, filter);
 
     if (isContentTypes) {
         if (!yes) {
@@ -125,34 +136,51 @@ async function deleteEntries(contentfulSpace: Space, contentType: string | undef
         });
         totalEntries = entries.total;
 
-        const promises: Array<Promise<void>> = [];
+        const promises: Array<Promise<boolean>> = [];
         for (const entry of entries.items.filter(e => filter(e))) {
-            const promise = unpublishAndDeleteEntry(entry, entriesProgressBar, verbose);
+            const promise = unpublishAndDeleteEntry(selectedEnvironment, entry, entriesProgressBar, verbose);
             promises.push(promise);
         }
-        await Promise.all(promises);
-        offset += entries.limit;
+        let results = await Promise.all(promises);
+        offset += entries.limit - results.filter(r => r).length;
     } while (totalEntries > batchSize);
 }
 
-async function unpublishAndDeleteEntry(entry: Entry, progressBar: ProgressBar, verbose: boolean) {
+async function unpublishAndDeleteEntry(contentfulEnv: Environment, entry: Entry, progressBar: ProgressBar, verbose: boolean) {
     try {
-        if (entry.isPublished()) {
-            if (verbose)
-                console.log(`Unpublishing entry "${entry.sys.id}"`);
-            await entry.unpublish();
+        if (!entry.isPublished() && !entry.isUpdated()) {
+            if (entry.fields.seriesList) {
+                for (const series of entry.fields.seriesList["en-GB"]) {
+                    try {
+                        let seriesEntry = await contentfulEnv.getEntry(series.sys.id);
+                        await unpublishAndDeleteEntry(contentfulEnv, seriesEntry, progressBar, verbose);
+                    } catch (e) {
+                        console.log(e);
+                    }
+                }
+            }
+            if (entry.fields.episodeList) {
+                for (const episode of entry.fields.episodeList["en-GB"]) {
+                    try {
+                        let episodeEntry = await contentfulEnv.getEntry(episode.sys.id);
+                        await unpublishAndDeleteEntry(contentfulEnv, episodeEntry, progressBar, verbose);
+                    } catch (e) {
+                        console.log(e);
+                    }
+                }
+            }
+            console.log(`Deleting entry ${entry.sys.contentType.sys.id} '${entry.sys.id}"`);
+            await entry.delete();
+            progressBar.tick();
+            return true;
         }
-        if (verbose) {
-            console.log(`Deleting entry '${entry.sys.id}"`);
-        }
-        // require('fs').appendFileSync('log.csv', `${entry.fields.programmeNamePcs["en-GB"]}\n`);
-        // require('fs').appendFileSync('log-ids.csv', `${entry.sys.id}\n`);
-        await entry.delete();
-    } catch (e) {
-        console.log(e);
-        // Continue if something went wrong with Contentful
-    } finally {
         progressBar.tick();
+        return false;
+    } catch (e) {
+        progressBar.tick();
+        console.log(e);
+        return false;
+        // Continue if something went wrong with Contentful
     }
 }
 
